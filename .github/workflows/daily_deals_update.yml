@@ -2,6 +2,9 @@ name: Daily deals update
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - "data/deals_latest.csv"
   schedule:
     - cron: "20 4 * * *"
 
@@ -10,31 +13,35 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Prepare SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Create test CSV
+      - name: Check deals file
         run: |
-          cat > deals_latest.csv <<'CSV'
-          кадастровый квартал;тип сделки;год;квартал сделки;адрес;ври;площадь;цена;тип договора
-          71:22:010412;sale;2024;4;ул. Глеба Успенского;Для ведения личного подсобного хозяйства;3935;3500000;ДКП
-          71:22:010412;sale;2024;4;ул. Шоссейная;Для ведения личного подсобного хозяйства;7009;300000;ДКП
-          71:22:010412;sale;2025;1;не указана;Для ведения личного подсобного хозяйства;4029;500000;ДКП
-          71:22:010412;sale;2025;3;ул. Парковая;Для ведения личного подсобного хозяйства;9167;4950000;ДКП
-          71:22:010412;rent;2025;4;не указана;Для ведения личного подсобного хозяйства;3877;68500;Договор аренды
-          71:22:010412;rent;2025;4;не указана;Для ведения личного подсобного хозяйства;2881;54200;Договор аренды
-          CSV
+          echo "Проверяю файл базы..."
+          ls -lah
+          ls -lah data
+          test -f data/deals_latest.csv
 
-          sed -i 's/^          //' deals_latest.csv
+      - name: Upload deals CSV to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "data/deals_latest.csv"
+          target: "/root/gorizont_bot/deals_imports"
+          strip_components: 1
 
-      - name: Upload CSV to VPS
-        run: |
-          scp deals_latest.csv "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/root/gorizont_bot/deals_imports/deals_latest.csv"
-
-      - name: Import CSV on VPS
-        run: |
-          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" "cd /root/gorizont_bot && /root/gorizont_bot/venv/bin/python update_deals.py --local /root/gorizont_bot/deals_imports/deals_latest.csv"
+      - name: Import deals on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /root/gorizont_bot
+            mkdir -p /root/gorizont_bot/deals_imports
+            ls -lh /root/gorizont_bot/deals_imports/deals_latest.csv
+            /root/gorizont_bot/venv/bin/python /root/gorizont_bot/update_deals.py --local /root/gorizont_bot/deals_imports/deals_latest.csv
+            systemctl restart gorizont_bot
