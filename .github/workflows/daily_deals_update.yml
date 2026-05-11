@@ -2,46 +2,166 @@ name: Daily deals update
 
 on:
   workflow_dispatch:
+
   push:
     paths:
       - "data/deals_latest.csv"
+      - ".github/workflows/daily_deals_update.yml"
+
   schedule:
-    - cron: "20 4 * * *"
+    - cron: "20 1 * * *"
 
 jobs:
   update-deals:
     runs-on: ubuntu-latest
 
+    env:
+      LOCAL_FILE: data/deals_latest.csv
+      REMOTE_DIR: /root/gorizont_bot
+      REMOTE_FILE: /root/gorizont_bot/deals_imports/deals_latest.csv
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_PORT: ${{ secrets.VPS_PORT }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check deals file
+      - name: Check local deals file
         run: |
-          echo "Проверяю файл базы..."
-          ls -lah
-          ls -lah data
-          test -f data/deals_latest.csv
+          set -e
 
-      - name: Upload deals CSV to VPS
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          source: "data/deals_latest.csv"
-          target: "/root/gorizont_bot/deals_imports"
-          strip_components: 1
+          echo "Проверяю файл базы сделок..."
+
+          if [ ! -f "$LOCAL_FILE" ]; then
+            echo "Файл $LOCAL_FILE не найден"
+            exit 1
+          fi
+
+          echo "Файл найден:"
+          ls -lh "$LOCAL_FILE"
+
+          echo "Первые строки:"
+          head -n 5 "$LOCAL_FILE"
+
+      - name: Prepare SSH
+        run: |
+          set -e
+
+          if [ -z "$VPS_HOST" ]; then
+            echo "Не указан секрет VPS_HOST"
+            exit 1
+          fi
+
+          if [ -z "$VPS_USER" ]; then
+            echo "VPS_USER не указан, использую root"
+            VPS_USER="root"
+          fi
+
+          if [ -z "$VPS_PORT" ]; then
+            echo "VPS_PORT не указан, использую 22"
+            VPS_PORT="22"
+          fi
+
+          if [ -z "$VPS_SSH_KEY" ]; then
+            echo "Не указан секрет VPS_SSH_KEY"
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf "%s" "$VPS_SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          ssh-keyscan -p "$VPS_PORT" -H "$VPS_HOST" >> ~/.ssh/known_hosts
+
+          echo "SSH подготовлен"
+
+      - name: Upload deals file to VPS
+        run: |
+          set -e
+
+          if [ -z "$VPS_USER" ]; then
+            VPS_USER="root"
+          fi
+
+          if [ -z "$VPS_PORT" ]; then
+            VPS_PORT="22"
+          fi
+
+          echo "Создаю папку на VPS..."
+          ssh -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" "mkdir -p /root/gorizont_bot/deals_imports"
+
+          echo "Загружаю файл базы на VPS..."
+          scp -P "$VPS_PORT" "$LOCAL_FILE" "$VPS_USER@$VPS_HOST:$REMOTE_FILE.tmp"
+
+          echo "Файл загружен"
 
       - name: Import deals on VPS
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script: |
-            cd /root/gorizont_bot
-            mkdir -p /root/gorizont_bot/deals_imports
-            ls -lh /root/gorizont_bot/deals_imports/deals_latest.csv
-            /root/gorizont_bot/venv/bin/python /root/gorizont_bot/update_deals.py --local /root/gorizont_bot/deals_imports/deals_latest.csv
-            systemctl restart gorizont_bot
+        run: |
+          set -e
+
+          if [ -z "$VPS_USER" ]; then
+            VPS_USER="root"
+          fi
+
+          if [ -z "$VPS_PORT" ]; then
+            VPS_PORT="22"
+          fi
+
+          ssh -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" << 'REMOTE'
+          set -e
+
+          cd /root/gorizont_bot
+
+          echo "Переношу свежий файл базы..."
+          mv /root/gorizont_bot/deals_imports/deals_latest.csv.tmp /root/gorizont_bot/deals_imports/deals_latest.csv
+
+          echo "Размер файла на VPS:"
+          ls -lh /root/gorizont_bot/deals_imports/deals_latest.csv
+
+          echo "Делаю backup .env..."
+          cp .env env_backup_before_github_deals_$(date +%Y%m%d_%H%M%S) || true
+
+          echo "Обновляю настройки источника базы..."
+          python3 - <<'PY'
+          from pathlib import Path
+
+          env_path = Path("/root/gorizont_bot/.env")
+
+          old_lines = []
+          if env_path.exists():
+              old_lines = env_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+
+          new_lines = []
+          for line in old_lines:
+              clean = line.strip()
+              if clean.startswith("DEALS_CSV_URL="):
+                  continue
+              if clean.startswith("DEALS_CSV_URLS="):
+                  continue
+              if clean.startswith("DEALS_LOCAL_PATH="):
+                  continue
+              new_lines.append(line)
+
+          new_lines.append("DEALS_LOCAL_PATH=/root/gorizont_bot/deals_imports/deals_latest.csv")
+          new_lines.append("DEALS_CSV_URL=file:///root/gorizont_bot/deals_imports/deals_latest.csv")
+
+          env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+          PY
+
+          echo "Запускаю импорт сделок..."
+          DEALS_LOCAL_PATH=/root/gorizont_bot/deals_imports/deals_latest.csv \
+          DEALS_CSV_URL=file:///root/gorizont_bot/deals_imports/deals_latest.csv \
+          /root/gorizont_bot/venv/bin/python /root/gorizont_bot/update_deals.py
+
+          echo "Перезапускаю бота..."
+          systemctl restart gorizont_bot.service
+
+          echo "Проверяю статус бота..."
+          systemctl status gorizont_bot.service --no-pager -l | head -n 25
+
+          echo "Готово"
+          REMOTE
