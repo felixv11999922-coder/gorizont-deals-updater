@@ -1,0 +1,44 @@
+name: Push deals database to VPS
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "data/deals_latest.csv"
+  schedule:
+    - cron: "20 4 * * *"
+
+jobs:
+  push-deals:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check file exists
+        run: |
+          ls -lah
+          ls -lah data
+          test -f data/deals_latest.csv
+
+      - name: Upload deals CSV to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "data/deals_latest.csv"
+          target: "/root/gorizont_bot/deals_imports"
+          strip_components: 1
+
+      - name: Import deals on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /root/gorizont_bot
+            /root/gorizont_bot/venv/bin/python /root/gorizont_bot/update_deals.py --local /root/gorizont_bot/deals_imports/deals_latest.csv
+            systemctl restart gorizont_bot
