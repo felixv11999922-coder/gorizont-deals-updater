@@ -1,0 +1,108 @@
+name: Publish cadastral quarters release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "data/cadastral_quarters_all.csv"
+      - ".github/workflows/publish_quarters_release.yml"
+
+permissions:
+  contents: write
+
+env:
+  QUARTERS_CSV: data/cadastral_quarters_all.csv
+  QUARTERS_GZ: data/cadastral_quarters_all.csv.gz
+  QUARTERS_SHA256: data/cadastral_quarters_all.sha256.txt
+  RELEASE_TAG: quarters-latest
+  RELEASE_TITLE: Latest cadastral quarters database
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check source CSV exists
+        run: |
+          set -euo pipefail
+
+          echo "Checking source file: $QUARTERS_CSV"
+
+          if [ ! -f "$QUARTERS_CSV" ]; then
+            echo "ERROR: $QUARTERS_CSV not found"
+            echo "Create data/cadastral_quarters_all.csv first."
+            exit 1
+          fi
+
+          ls -lh "$QUARTERS_CSV"
+          head -n 5 "$QUARTERS_CSV" || true
+
+      - name: Validate source CSV
+        run: |
+          set -euo pipefail
+
+          LINES=$(wc -l < "$QUARTERS_CSV")
+          echo "CSV lines: $LINES"
+
+          if [ "$LINES" -lt 1000 ]; then
+            echo "ERROR: too few lines in cadastral quarters CSV"
+            echo "Expected at least 1000 lines."
+            exit 1
+          fi
+
+          HEADER=$(head -n 1 "$QUARTERS_CSV")
+          echo "CSV header: $HEADER"
+
+          case "$HEADER" in
+            *cadastral_quarter*|*кадастровый_квартал*|*"кадастровый квартал"*)
+              echo "Header looks OK"
+              ;;
+            *)
+              echo "ERROR: header should contain cadastral_quarter or кадастровый_квартал"
+              exit 1
+              ;;
+          esac
+
+      - name: Build gzip and checksum
+        run: |
+          set -euo pipefail
+
+          rm -f "$QUARTERS_GZ" "$QUARTERS_SHA256"
+
+          gzip -c "$QUARTERS_CSV" > "$QUARTERS_GZ"
+
+          sha256sum "$QUARTERS_GZ" > "$QUARTERS_SHA256"
+
+          echo "Generated files:"
+          ls -lh "$QUARTERS_CSV" "$QUARTERS_GZ" "$QUARTERS_SHA256"
+
+          echo "Checksum:"
+          cat "$QUARTERS_SHA256"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists"
+          else
+            echo "Creating release $RELEASE_TAG"
+            gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes "Automatically published cadastral quarters database for Zemelny Gorizont PRO."
+          fi
+
+          echo "Uploading assets..."
+          gh release upload "$RELEASE_TAG" \
+            "$QUARTERS_GZ" \
+            "$QUARTERS_SHA256" \
+            --clobber
+
+          echo "Release updated successfully"
