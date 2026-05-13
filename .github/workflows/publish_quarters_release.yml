@@ -7,7 +7,6 @@ on:
       - main
     paths:
       - "data/cadastral_quarters_all.csv"
-      - ".github/workflows/publish_quarters_release.yml"
 
 permissions:
   contents: write
