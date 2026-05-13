@@ -1,0 +1,51 @@
+name: Build cadastral quarters from deals preview
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "data/deals_latest.csv"
+      - "scripts/build_cadastral_quarters.py"
+      - ".github/workflows/build_quarters_from_deals_preview.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build quarters preview from deals
+        run: |
+          mkdir -p build
+
+          python scripts/build_cadastral_quarters.py \
+            --input data/deals_latest.csv \
+            --output build/cadastral_quarters_from_deals.preview.csv \
+            --min-rows 1
+
+          gzip -c build/cadastral_quarters_from_deals.preview.csv > build/cadastral_quarters_from_deals.preview.csv.gz
+
+          echo "Preview files:"
+          ls -lh build
+
+          echo "First lines:"
+          head -n 20 build/cadastral_quarters_from_deals.preview.csv
+
+      - name: Upload preview artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cadastral-quarters-from-deals-preview
+          path: |
+            build/cadastral_quarters_from_deals.preview.csv
+            build/cadastral_quarters_from_deals.preview.csv.gz
+          if-no-files-found: error
+          retention-days: 7
