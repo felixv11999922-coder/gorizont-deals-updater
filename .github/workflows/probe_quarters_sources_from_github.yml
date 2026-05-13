@@ -1,0 +1,89 @@
+name: Probe cadastral quarters sources from GitHub
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Probe known cadastral quarters sources
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          mkdir -p out
+          REPORT="out/quarters_sources_github_probe.txt"
+
+          echo "GITHUB QUARTERS SOURCES PROBE" | tee "$REPORT"
+          echo "date UTC: $(date -u '+%F %T')" | tee -a "$REPORT"
+          echo "runner: $(uname -a)" | tee -a "$REPORT"
+          echo | tee -a "$REPORT"
+
+          URLS=(
+            "https://nspd.gov.ru"
+            "https://nspd.gov.ru/map"
+            "https://pkk.rosreestr.ru"
+            "https://pkk.rosreestr.ru/api/features/2?sq=71:22:010412&text=71:22:010412&limit=5"
+
+            "https://github.com/felixv11999922-coder/gorizont-deals-updater/releases/download/quarters-latest/cadastral_quarters_all.csv.gz"
+            "https://github.com/felixv11999922-coder/gorizont-deals-updater/releases/download/quarters-latest/cadastral_quarters_all.csv"
+
+            "https://raw.githubusercontent.com/felixv11999922-coder/gorizont-deals-updater/main/data/cadastral_quarters_all.csv.gz"
+            "https://raw.githubusercontent.com/felixv11999922-coder/gorizont-deals-updater/main/data/cadastral_quarters_all.csv"
+
+            "https://felixv11999922-coder.github.io/gorizont-deals-updater/cadastral_quarters_all.csv.gz"
+            "https://felixv11999922-coder.github.io/gorizont-deals-updater/cadastral_quarters_all.csv"
+          )
+
+          for URL in "${URLS[@]}"; do
+            echo "========================================" | tee -a "$REPORT"
+            echo "URL: $URL" | tee -a "$REPORT"
+
+            TMP="out/response.tmp"
+            rm -f "$TMP"
+
+            set +e
+            curl -L \
+              --ipv4 \
+              --connect-timeout 10 \
+              --max-time 25 \
+              --retry 1 \
+              -A "Mozilla/5.0 GitHubActionsQuartersProbe" \
+              -o "$TMP" \
+              -w "http_code=%{http_code} content_type=%{content_type} size=%{size_download} time=%{time_total}\n" \
+              "$URL" > out/curl_meta.tmp 2> out/curl_err.tmp
+            CODE=$?
+            set -e
+
+            echo "exit_code=$CODE" | tee -a "$REPORT"
+            cat out/curl_err.tmp | tee -a "$REPORT" || true
+            cat out/curl_meta.tmp | tee -a "$REPORT" || true
+
+            if [ -f "$TMP" ]; then
+              echo "first_bytes:" | tee -a "$REPORT"
+              head -c 800 "$TMP" | tee -a "$REPORT" || true
+              echo | tee -a "$REPORT"
+              echo "saved_response_size:" | tee -a "$REPORT"
+              ls -lh "$TMP" | tee -a "$REPORT"
+            else
+              echo "response_file: not created" | tee -a "$REPORT"
+            fi
+
+            echo | tee -a "$REPORT"
+          done
+
+          echo "DONE" | tee -a "$REPORT"
+          cat "$REPORT"
+
+      - name: Upload probe report
+        uses: actions/upload-artifact@v4
+        with:
+          name: quarters-sources-github-probe
+          path: out/quarters_sources_github_probe.txt
