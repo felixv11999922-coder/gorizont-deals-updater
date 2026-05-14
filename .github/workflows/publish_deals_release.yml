@@ -1,49 +1,54 @@
-name: Publish deals database release
+name: Publish deals_latest release
 
 on:
   workflow_dispatch:
+    inputs:
+      min_rows:
+        description: "Minimum rows required before publishing"
+        required: true
+        default: "10"
   push:
+    branches:
+      - main
     paths:
+      - "data/deals_source.csv"
       - "data/deals_latest.csv"
+      - "scripts/build_deals_release.py"
       - ".github/workflows/publish_deals_release.yml"
-  schedule:
-    - cron: "20 3 * * *"
 
 permissions:
   contents: write
 
 jobs:
-  publish:
+  build-and-publish:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check source file
-        run: |
-          test -f data/deals_latest.csv
-          echo "Source file:"
-          ls -lh data/deals_latest.csv
-          echo "First rows:"
-          head -n 5 data/deals_latest.csv
-
-      - name: Build compressed database
-        run: |
-          mkdir -p release
-          cp data/deals_latest.csv release/deals_latest.csv
-          gzip -c data/deals_latest.csv > release/deals_latest.csv.gz
-          echo "Release files:"
-          ls -lh release
-
-      - name: Publish release assets
+      - name: Build deals_latest.csv.gz
         env:
-          GH_TOKEN: ${{ github.token }}
+          MIN_DEALS_ROWS: ${{ github.event.inputs.min_rows || '10' }}
         run: |
-          if gh release view deals-latest >/dev/null 2>&1; then
-            gh release upload deals-latest release/deals_latest.csv release/deals_latest.csv.gz --clobber
-          else
-            gh release create deals-latest release/deals_latest.csv release/deals_latest.csv.gz \
-              --title "Latest deals database" \
-              --notes "Автоматически опубликованная база сделок"
-          fi
+          python3 scripts/build_deals_release.py
+          ls -lh data/deals_latest.csv data/deals_latest.csv.gz
+          echo
+          echo "First lines:"
+          zcat data/deals_latest.csv.gz | head -n 5
+
+      - name: Publish GitHub Release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: deals-latest
+          name: deals-latest
+          body: |
+            Автоматически собранный файл сделок для Земельный Горизонт PRO.
+
+            Файл:
+            - deals_latest.csv.gz
+          files: |
+            data/deals_latest.csv.gz
+            data/deals_latest.csv
+          make_latest: true
+          fail_on_unmatched_files: true
