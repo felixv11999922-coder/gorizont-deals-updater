@@ -6,7 +6,7 @@ on:
       min_rows:
         description: "Minimum rows required before publishing"
         required: true
-        default: "10"
+        default: "1"
   push:
     branches:
       - main
@@ -29,7 +29,7 @@ jobs:
 
       - name: Build deals_latest.csv.gz
         env:
-          MIN_DEALS_ROWS: ${{ github.event.inputs.min_rows || '10' }}
+          MIN_DEALS_ROWS: ${{ github.event.inputs.min_rows || '1' }}
         run: |
           python3 scripts/build_deals_release.py
           ls -lh data/deals_latest.csv data/deals_latest.csv.gz
