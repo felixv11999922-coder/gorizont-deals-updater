@@ -1,0 +1,39 @@
+name: Probe GIS Torgi quarter
+
+on:
+  workflow_dispatch:
+    inputs:
+      quarter:
+        description: "Cadastral quarter, e.g. 71:22:050123"
+        required: true
+        default: "71:22:050123"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Probe GIS Torgi
+        run: |
+          python3 scripts/probe_gis_torgi_quarter.py "${{ github.event.inputs.quarter }}"
+
+      - name: Show files
+        if: always()
+        run: |
+          find gis_torgi_probe_out -maxdepth 1 -type f -print -exec ls -lh {} \; || true
+          echo
+          echo "=== summary.csv ==="
+          cat gis_torgi_probe_out/summary.csv || true
+
+      - name: Upload probe artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gis-torgi-probe
+          path: gis_torgi_probe_out/
