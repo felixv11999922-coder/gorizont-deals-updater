@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       quarter:
-        description: "Cadastral quarter, e.g. 71:22:050123"
+        description: "Cadastral quarter"
         required: true
         default: "71:22:050123"
 
@@ -14,26 +14,30 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
+    timeout-minutes: 2
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Probe GIS Torgi
+      - name: Probe GIS Torgi API with hard timeout
         run: |
-          python3 scripts/probe_gis_torgi_quarter.py "${{ github.event.inputs.quarter }}"
+          set -o pipefail
+          timeout 90s python3 scripts/probe_gis_torgi_quarter.py "${{ github.event.inputs.quarter }}" || true
 
-      - name: Show files
+      - name: Show probe output files
         if: always()
         run: |
-          find gis_torgi_probe_out -maxdepth 1 -type f -print -exec ls -lh {} \; || true
+          echo "=== files ==="
+          find gis_torgi_probe_out -maxdepth 2 -type f -print -exec ls -lh {} \; 2>/dev/null || true
           echo
-          echo "=== summary.csv ==="
-          cat gis_torgi_probe_out/summary.csv || true
+          echo "=== text previews ==="
+          find gis_torgi_probe_out -type f \( -name "*.txt" -o -name "*.json" -o -name "*.csv" \) -maxdepth 2 -print -exec sh -c 'echo "--- $1"; head -c 4000 "$1"; echo' sh {} \; 2>/dev/null || true
 
-      - name: Upload probe artifact
+      - name: Upload probe artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gis-torgi-probe
           path: gis_torgi_probe_out/
+          if-no-files-found: ignore
