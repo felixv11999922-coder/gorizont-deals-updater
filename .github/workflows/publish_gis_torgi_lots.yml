@@ -1,0 +1,46 @@
+name: Publish GIS Torgi lots
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pandas openpyxl requests
+
+      - name: Build GIS Torgi lots CSV
+        env:
+          MIN_GIS_TORGI_ROWS: "1"
+        run: |
+          python scripts/build_gis_torgi_lots.py
+          ls -lh data/gis_torgi_lots_latest.csv.gz
+
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view gis-torgi-latest >/dev/null 2>&1 || \
+            gh release create gis-torgi-latest \
+              --title "GIS Torgi latest" \
+              --notes "Автоматическая выгрузка лотов ГИС Торги для Земельный Горизонт PRO"
+
+          gh release upload gis-torgi-latest data/gis_torgi_lots_latest.csv.gz --clobber
