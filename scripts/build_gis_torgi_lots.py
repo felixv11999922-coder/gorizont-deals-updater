@@ -4,11 +4,13 @@ import gzip
 import hashlib
 import os
 import re
+import sys
 from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
 import requests
+
 
 OUT = Path("data")
 OUT.mkdir(parents=True, exist_ok=True)
@@ -17,6 +19,8 @@ CSV_GZ = OUT / "gis_torgi_lots_latest.csv.gz"
 
 CAD_RE = re.compile(r"\b\d{2}:\d{2}:\d{6,7}(?::\d+)?\b")
 LOT_RE = re.compile(r"\b\d{10,}_\d+\b")
+
+REQUEST_TIMEOUT = (10, 25)
 
 URLS = [
     (
@@ -61,79 +65,126 @@ FIELDS = [
 ]
 
 
-def norm(value):
-    return str(value or "").strip()
+def log(message: str) -> None:
+    print(message, flush=True)
 
 
-def low(value):
+def norm(value) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"nan", "none", "null"}:
+        return ""
+    return text
+
+
+def low(value) -> str:
     return norm(value).lower()
 
 
-def pick(row, *needles):
+def pick(row: dict, *needles: str) -> str:
     for key, value in row.items():
-        k = low(key)
-        if all(n in k for n in needles):
-            v = norm(value)
-            if v and v.lower() != "nan":
-                return v
+        key_text = low(key)
+        if all(needle in key_text for needle in needles):
+            result = norm(value)
+            if result:
+                return result
     return ""
 
 
-def first_non_empty(row):
+def first_non_empty(row: dict) -> str:
     for value in row.values():
-        v = norm(value)
-        if v and v.lower() != "nan" and len(v) > 10:
-            return v
+        result = norm(value)
+        if result and len(result) > 10:
+            return result
     return ""
 
 
-def extract_record(source_label, row):
+def extract_record(source_label: str, row: dict) -> dict:
     full = " | ".join(norm(v) for v in row.values())
 
     source_url = ""
     for value in row.values():
-        v = norm(value)
-        if "torgi.gov.ru" in v:
-            source_url = v
+        text = norm(value)
+        if "torgi.gov.ru" in text:
+            source_url = text
             break
 
     lot_id = (
         pick(row, "номер", "лота")
-        or pick(row, "лот")
+        or pick(row, "номер", "процед")
         or pick(row, "извещ")
+        or pick(row, "лот")
         or pick(row, "id")
     )
 
     if not lot_id:
-        m = LOT_RE.search(source_url or full)
-        if m:
-            lot_id = m.group(0)
+        match = LOT_RE.search(source_url or full)
+        if match:
+            lot_id = match.group(0)
 
     if not lot_id:
         lot_id = source_label + "_" + hashlib.sha256(full.encode("utf-8")).hexdigest()[:20]
 
-    cad = ""
-    m = CAD_RE.search(full)
-    if m:
-        cad = m.group(0)
+    cadastral_number = ""
+    cad_match = CAD_RE.search(full)
+    if cad_match:
+        cadastral_number = cad_match.group(0)
 
     title = (
         pick(row, "предмет")
         or pick(row, "наименование", "лота")
         or pick(row, "наименование")
+        or pick(row, "объект")
         or first_non_empty(row)
     )
 
-    description = pick(row, "описание") or pick(row, "сведения") or pick(row, "характерист")
-    region = pick(row, "субъект") or pick(row, "регион")
-    address = pick(row, "адрес") or pick(row, "местоположение")
-    price = pick(row, "начальная", "цена") or pick(row, "цена") or pick(row, "плата")
+    description = (
+        pick(row, "описание")
+        or pick(row, "сведения")
+        or pick(row, "характерист")
+        or pick(row, "информация")
+    )
+
+    region = (
+        pick(row, "субъект")
+        or pick(row, "регион")
+        or pick(row, "местонахождение")
+    )
+
+    address = (
+        pick(row, "адрес")
+        or pick(row, "местоположение")
+        or pick(row, "место", "нахождения")
+    )
+
+    price = (
+        pick(row, "начальная", "цена")
+        or pick(row, "цена")
+        or pick(row, "размер", "платы")
+        or pick(row, "арендная", "плата")
+    )
+
     area = pick(row, "площад")
     status = pick(row, "статус") or pick(row, "состояние")
 
-    published_at = pick(row, "публикац") or pick(row, "размещ")
-    bid_end_at = pick(row, "оконч", "заяв") or pick(row, "прием", "заяв")
-    auction_at = pick(row, "дата", "торг") or pick(row, "аукцион")
+    published_at = (
+        pick(row, "дата", "публикац")
+        or pick(row, "публикац")
+        or pick(row, "размещ")
+    )
+
+    bid_end_at = (
+        pick(row, "оконч", "заяв")
+        or pick(row, "прием", "заяв")
+        or pick(row, "подач", "заяв")
+    )
+
+    auction_at = (
+        pick(row, "дата", "торг")
+        or pick(row, "провед", "аукцион")
+        or pick(row, "аукцион")
+    )
 
     return {
         "lot_id": lot_id[:200],
@@ -143,7 +194,7 @@ def extract_record(source_label, row):
         "description": description[:2000],
         "region": region[:500],
         "address": address[:1000],
-        "cadastral_number": cad[:100],
+        "cadastral_number": cadastral_number[:100],
         "area_text": area[:300],
         "price_text": price[:300],
         "status": status[:300],
@@ -153,65 +204,102 @@ def extract_record(source_label, row):
     }
 
 
-def load_url(label, url):
-    print(f"FETCH {label}: {url}")
-    r = requests.get(
+def is_relevant_land_row(row: dict) -> bool:
+    text = " ".join(norm(v).lower() for v in row.values())
+    return any(
+        marker in text
+        for marker in [
+            "земель",
+            "участ",
+            "кадастр",
+            "аренд",
+            "собствен",
+            "земли",
+        ]
+    )
+
+
+def load_url(label: str, url: str) -> list[dict]:
+    log("")
+    log(f"FETCH {label}: {url}")
+
+    response = requests.get(
         url,
-        timeout=90,
+        timeout=REQUEST_TIMEOUT,
         headers={
             "User-Agent": "ZemelnyGorizontPRO GitHub Actions collector",
             "Accept": "*/*",
         },
     )
-    r.raise_for_status()
 
-    print(f"  bytes={len(r.content)} content_type={r.headers.get('content-type')}")
+    log(f"  status={response.status_code}")
+    log(f"  bytes={len(response.content)} content_type={response.headers.get('content-type')}")
 
-    df = pd.read_excel(BytesIO(r.content), dtype=str)
+    response.raise_for_status()
+
+    if not response.content:
+        raise RuntimeError("empty response")
+
+    if response.content[:2] != b"PK":
+        preview = response.content[:300].decode("utf-8", errors="replace")
+        raise RuntimeError(f"response is not XLSX/ZIP, preview={preview!r}")
+
+    df = pd.read_excel(BytesIO(response.content), dtype=str)
     df = df.fillna("")
-    print(f"  rows={len(df)} cols={len(df.columns)}")
+
+    log(f"  rows={len(df)} cols={len(df.columns)}")
+    log(f"  columns={list(df.columns)[:20]}")
 
     records = []
     for raw in df.to_dict(orient="records"):
-        text = " ".join(norm(v).lower() for v in raw.values())
-        if not any(x in text for x in ["земель", "участ", "кадастр", "аренд", "собствен"]):
+        if not is_relevant_land_row(raw):
             continue
         records.append(extract_record(label, raw))
 
-    print(f"  relevant={len(records)}")
+    log(f"  relevant={len(records)}")
     return records
 
 
-def main():
-    all_records = {}
-    errors = []
+def write_csv_gz(records: list[dict]) -> None:
+    with gzip.open(CSV_GZ, "wt", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=FIELDS, delimiter=";")
+        writer.writeheader()
+        writer.writerows(records)
+
+    log(f"written: {CSV_GZ}")
+    log(f"size: {CSV_GZ.stat().st_size}")
+
+
+def main() -> None:
+    log("GIS TORGI LOTS BUILDER")
+    log(f"python: {sys.version}")
+    log(f"output: {CSV_GZ}")
+    log(f"request_timeout: {REQUEST_TIMEOUT}")
+
+    all_records: dict[str, dict] = {}
+    errors: list[tuple[str, str]] = []
 
     for label, url in URLS:
         try:
-            for rec in load_url(label, url):
-                all_records[rec["lot_id"]] = rec
-        except Exception as e:
-            print(f"ERROR {label}: {e!r}")
-            errors.append((label, repr(e)))
+            records = load_url(label, url)
+            for record in records:
+                all_records[record["lot_id"]] = record
+        except Exception as exc:
+            log(f"ERROR {label}: {exc!r}")
+            errors.append((label, repr(exc)))
 
     records = list(all_records.values())
     min_rows = int(os.environ.get("MIN_GIS_TORGI_ROWS", "1"))
 
-    print()
-    print("SUMMARY")
-    print("records:", len(records))
-    print("errors:", errors)
+    log("")
+    log("SUMMARY")
+    log(f"records: {len(records)}")
+    log(f"errors: {errors}")
 
     if len(records) < min_rows:
         raise SystemExit(f"too few rows: {len(records)} < {min_rows}")
 
-    with gzip.open(CSV_GZ, "wt", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDS, delimiter=";")
-        writer.writeheader()
-        writer.writerows(records)
-
-    print("written:", CSV_GZ)
-    print("size:", CSV_GZ.stat().st_size)
+    write_csv_gz(records)
 
 
 if __name__ == "__main__":
