@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 8
 
     steps:
       - name: Checkout
@@ -30,8 +30,9 @@ jobs:
       - name: Build GIS Torgi lots CSV
         env:
           MIN_GIS_TORGI_ROWS: "1"
+          PYTHONUNBUFFERED: "1"
         run: |
-          python scripts/build_gis_torgi_lots.py
+          timeout 6m python -u scripts/build_gis_torgi_lots.py
           ls -lh data/gis_torgi_lots_latest.csv.gz
 
       - name: Publish release asset
