@@ -5,47 +5,20 @@ import hashlib
 import os
 import re
 import sys
-from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
-import requests
 
 
-OUT = Path("data")
-OUT.mkdir(parents=True, exist_ok=True)
+BASE = Path(".")
+INPUT_DIR = BASE / "data" / "manual_gis_torgi"
+OUT_DIR = BASE / "data"
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-CSV_GZ = OUT / "gis_torgi_lots_latest.csv.gz"
+CSV_GZ = OUT_DIR / "gis_torgi_lots_latest.csv.gz"
 
 CAD_RE = re.compile(r"\b\d{2}:\d{2}:\d{6,7}(?::\d+)?\b")
 LOT_RE = re.compile(r"\b\d{10,}_\d+\b")
-
-REQUEST_TIMEOUT = (10, 25)
-
-URLS = [
-    (
-        "text_land_plot",
-        "https://torgi.gov.ru/new/api/public/lotcards/export/excel"
-        "?byFirstVersion=true&filterFavorites=false"
-        "&lotStatus=PUBLISHED%2CAPPLICATIONS_SUBMISSION"
-        "&sort=firstVersionPublicationDate%2Cdesc"
-        "&text=%D0%B7%D0%B5%D0%BC%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%B9%20%D1%83%D1%87%D0%B0%D1%81%D1%82%D0%BE%D0%BA",
-    ),
-    (
-        "cat_301",
-        "https://torgi.gov.ru/new/api/public/lotcards/export/excel"
-        "?byFirstVersion=true&catCode=301&filterFavorites=false"
-        "&lotStatus=PUBLISHED%2CAPPLICATIONS_SUBMISSION"
-        "&sort=firstVersionPublicationDate%2Cdesc",
-    ),
-    (
-        "cat_302",
-        "https://torgi.gov.ru/new/api/public/lotcards/export/excel"
-        "?byFirstVersion=true&catCode=302&filterFavorites=false"
-        "&lotStatus=PUBLISHED%2CAPPLICATIONS_SUBMISSION"
-        "&sort=firstVersionPublicationDate%2Cdesc",
-    ),
-]
 
 FIELDS = [
     "lot_id",
@@ -100,6 +73,23 @@ def first_non_empty(row: dict) -> str:
     return ""
 
 
+def is_relevant_land_row(row: dict) -> bool:
+    text = " ".join(norm(v).lower() for v in row.values())
+    return any(
+        marker in text
+        for marker in [
+            "земель",
+            "участ",
+            "кадастр",
+            "аренд",
+            "собствен",
+            "земли",
+            "лот",
+            "торг",
+        ]
+    )
+
+
 def extract_record(source_label: str, row: dict) -> dict:
     full = " | ".join(norm(v) for v in row.values())
 
@@ -150,6 +140,7 @@ def extract_record(source_label: str, row: dict) -> dict:
         pick(row, "субъект")
         or pick(row, "регион")
         or pick(row, "местонахождение")
+        or pick(row, "место", "нахождения")
     )
 
     address = (
@@ -166,7 +157,11 @@ def extract_record(source_label: str, row: dict) -> dict:
     )
 
     area = pick(row, "площад")
-    status = pick(row, "статус") or pick(row, "состояние")
+
+    status = (
+        pick(row, "статус")
+        or pick(row, "состояние")
+    )
 
     published_at = (
         pick(row, "дата", "публикац")
@@ -188,7 +183,7 @@ def extract_record(source_label: str, row: dict) -> dict:
 
     return {
         "lot_id": lot_id[:200],
-        "source_label": source_label,
+        "source_label": source_label[:200],
         "source_url": source_url[:1000],
         "title": title[:1000],
         "description": description[:2000],
@@ -204,60 +199,73 @@ def extract_record(source_label: str, row: dict) -> dict:
     }
 
 
-def is_relevant_land_row(row: dict) -> bool:
-    text = " ".join(norm(v).lower() for v in row.values())
-    return any(
-        marker in text
-        for marker in [
-            "земель",
-            "участ",
-            "кадастр",
-            "аренд",
-            "собствен",
-            "земли",
-        ]
-    )
+def read_csv_file(path: Path) -> list[dict]:
+    log(f"READ CSV: {path}")
+
+    if str(path).endswith(".gz"):
+        opener = lambda: gzip.open(path, "rt", encoding="utf-8", errors="replace", newline="")
+    else:
+        opener = lambda: open(path, "r", encoding="utf-8", errors="replace", newline="")
+
+    with opener() as file:
+        sample = file.read(4096)
+        file.seek(0)
+
+        delimiter = ";"
+        if sample.count(",") > sample.count(";"):
+            delimiter = ","
+
+        reader = csv.DictReader(file, delimiter=delimiter)
+        rows = [dict(row) for row in reader]
+
+    log(f"  rows={len(rows)}")
+    return rows
 
 
-def load_url(label: str, url: str) -> list[dict]:
-    log("")
-    log(f"FETCH {label}: {url}")
+def read_xlsx_file(path: Path) -> list[dict]:
+    log(f"READ XLSX: {path}")
 
-    response = requests.get(
-        url,
-        timeout=REQUEST_TIMEOUT,
-        headers={
-            "User-Agent": "ZemelnyGorizontPRO GitHub Actions collector",
-            "Accept": "*/*",
-        },
-    )
+    all_rows: list[dict] = []
 
-    log(f"  status={response.status_code}")
-    log(f"  bytes={len(response.content)} content_type={response.headers.get('content-type')}")
+    sheets = pd.read_excel(path, sheet_name=None, dtype=str)
+    for sheet_name, df in sheets.items():
+        df = df.fillna("")
+        log(f"  sheet={sheet_name!r} rows={len(df)} cols={len(df.columns)}")
+        for row in df.to_dict(orient="records"):
+            row["_sheet"] = sheet_name
+            all_rows.append(row)
 
-    response.raise_for_status()
+    log(f"  total_rows={len(all_rows)}")
+    return all_rows
 
-    if not response.content:
-        raise RuntimeError("empty response")
 
-    if response.content[:2] != b"PK":
-        preview = response.content[:300].decode("utf-8", errors="replace")
-        raise RuntimeError(f"response is not XLSX/ZIP, preview={preview!r}")
+def read_input_file(path: Path) -> list[dict]:
+    suffixes = "".join(path.suffixes).lower()
 
-    df = pd.read_excel(BytesIO(response.content), dtype=str)
-    df = df.fillna("")
+    if suffixes.endswith(".xlsx"):
+        return read_xlsx_file(path)
 
-    log(f"  rows={len(df)} cols={len(df.columns)}")
-    log(f"  columns={list(df.columns)[:20]}")
+    if suffixes.endswith(".csv") or suffixes.endswith(".csv.gz"):
+        return read_csv_file(path)
 
-    records = []
-    for raw in df.to_dict(orient="records"):
-        if not is_relevant_land_row(raw):
+    log(f"SKIP unsupported file: {path}")
+    return []
+
+
+def find_input_files() -> list[Path]:
+    if not INPUT_DIR.exists():
+        return []
+
+    files = []
+    for path in sorted(INPUT_DIR.rglob("*")):
+        if not path.is_file():
             continue
-        records.append(extract_record(label, raw))
 
-    log(f"  relevant={len(records)}")
-    return records
+        name = path.name.lower()
+        if name.endswith(".xlsx") or name.endswith(".csv") or name.endswith(".csv.gz"):
+            files.append(path)
+
+    return files
 
 
 def write_csv_gz(records: list[dict]) -> None:
@@ -271,22 +279,40 @@ def write_csv_gz(records: list[dict]) -> None:
 
 
 def main() -> None:
-    log("GIS TORGI LOTS BUILDER")
+    log("GIS TORGI LOTS BUILDER — MANUAL FILE MODE")
     log(f"python: {sys.version}")
+    log(f"input_dir: {INPUT_DIR}")
     log(f"output: {CSV_GZ}")
-    log(f"request_timeout: {REQUEST_TIMEOUT}")
+
+    input_files = find_input_files()
+
+    if not input_files:
+        log("")
+        log("ERROR: no input files found")
+        log("Put .xlsx, .csv or .csv.gz files into data/manual_gis_torgi/")
+        raise SystemExit(2)
+
+    log("")
+    log("INPUT FILES:")
+    for path in input_files:
+        log(f"- {path}")
 
     all_records: dict[str, dict] = {}
-    errors: list[tuple[str, str]] = []
 
-    for label, url in URLS:
-        try:
-            records = load_url(label, url)
-            for record in records:
-                all_records[record["lot_id"]] = record
-        except Exception as exc:
-            log(f"ERROR {label}: {exc!r}")
-            errors.append((label, repr(exc)))
+    for path in input_files:
+        source_label = path.stem[:120]
+        rows = read_input_file(path)
+
+        relevant = 0
+        for row in rows:
+            if not is_relevant_land_row(row):
+                continue
+
+            record = extract_record(source_label, row)
+            all_records[record["lot_id"]] = record
+            relevant += 1
+
+        log(f"  relevant={relevant}")
 
     records = list(all_records.values())
     min_rows = int(os.environ.get("MIN_GIS_TORGI_ROWS", "1"))
@@ -294,12 +320,13 @@ def main() -> None:
     log("")
     log("SUMMARY")
     log(f"records: {len(records)}")
-    log(f"errors: {errors}")
+    log(f"min_rows: {min_rows}")
 
     if len(records) < min_rows:
         raise SystemExit(f"too few rows: {len(records)} < {min_rows}")
 
     write_csv_gz(records)
+    log("DONE")
 
 
 if __name__ == "__main__":
