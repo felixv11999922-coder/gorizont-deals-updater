@@ -1,0 +1,45 @@
+name: Free DNS hostname and IP geolocation preflight
+on:
+  push:
+    branches: [experiment/vless-connectivity-audit]
+    paths: [.github/workflows/vpn-temporary-hostname-audit.yml]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_PORT: ${{ secrets.VPS_PORT }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+    steps:
+      - name: Test public DNS alias and provider region without exposing the IP
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os,socket,sys,ipaddress,urllib.request,json
+          host=os.environ["VPS_HOST"]
+          addresses=sorted({x[4][0] for x in socket.getaddrinfo(host,None,socket.AF_INET)})
+          public=[x for x in addresses if ipaddress.ip_address(x).is_global]
+          if not public: print("SSH_PUBLIC_IPV4=false");sys.exit(1)
+          address=public[0]
+          print("SSH_PUBLIC_IPV4=true")
+          alias=address+".sslip.io"
+          try: alias_ips={a[4][0] for a in socket.getaddrinfo(alias,None,socket.AF_INET)}
+          except Exception: alias_ips=set()
+          print("FREE_TEST_DNS_POINTS_TO_SSH="+str(address in alias_ips).lower())
+          for url in ["https://ipinfo.io/"+address+"/json", "https://ipwho.is/"+address]:
+            try:
+              request=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0"})
+              data=json.load(urllib.request.urlopen(request,timeout=8))
+              code=data.get("country_code") or data.get("country")
+              if isinstance(code,str) and len(code)==2 and code.isalpha():
+                print("GEO_COUNTRY_ISO="+code.upper());break
+            except Exception: pass
+          else:
+            print("GEO_COUNTRY_ISO=unknown")
+          PY
+          echo "EXISTING_VPS_NOT_MODIFIED=true"
