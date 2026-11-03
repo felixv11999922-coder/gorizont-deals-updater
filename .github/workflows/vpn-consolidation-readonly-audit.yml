@@ -1,0 +1,66 @@
+name: Read-only VPS consolidation assessment
+on:
+  push:
+    branches: [experiment/vless-connectivity-audit]
+    paths: [.github/workflows/vpn-consolidation-readonly-audit.yml]
+permissions:
+  contents: read
+jobs:
+  assess:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_PORT: ${{ secrets.VPS_PORT }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+    steps:
+      - name: Check known SSH server is not the existing dedicated VPN IP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${VPS_HOST:-}" && test -n "${VPS_USER:-}" && test -n "${VPS_SSH_KEY:-}"
+          python3 - <<'PY'
+          import ipaddress, os, socket, sys
+          ssh_host = os.environ["VPS_HOST"]
+          try: ssh_addresses = {x[4][0] for x in socket.getaddrinfo(ssh_host,None,family=socket.AF_INET)}
+          except Exception: ssh_addresses=set()
+          vpn_ip="132.243.127.53"
+          if vpn_ip in ssh_addresses:
+            print("SSH_HOST_IS_KNOWN_VPN_IP=true")
+            sys.exit(2)
+          print("SSH_HOST_IS_KNOWN_VPN_IP=false")
+          for domain in ["myvnp-7.duckdns.org","myvnp-7.dynv6.net"]:
+            try: addresses={x[4][0] for x in socket.getaddrinfo(domain,None,family=socket.AF_INET)}
+            except Exception: addresses=set()
+            print("SSH_HOST_SAME_AS_"+domain.replace(".","_")+"="+str(bool(addresses&ssh_addresses)).lower())
+          PY
+      - name: Read system resources and 443 occupancy without writing to the VPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$VPS_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          port="${VPS_PORT:-22}"
+          ssh-keyscan -T 8 -p "$port" -H "$VPS_HOST" > "$HOME/.ssh/known_hosts" 2>/dev/null
+          ssh -o BatchMode=yes -o ConnectTimeout=12 -o StrictHostKeyChecking=yes -p "$port" -i "$HOME/.ssh/id_ed25519" "$VPS_USER@$VPS_HOST" 'bash -se' <<'REMOTE'
+          set -euo pipefail
+          if [ -r /etc/os-release ]; then . /etc/os-release; echo "REMOTE_OS=${ID:-unknown}"; fi
+          echo "REMOTE_ARCH=$(uname -m)"
+          echo "REMOTE_CORES=$(getconf _NPROCESSORS_ONLN)"
+          awk '/MemTotal:/ {printf "TOTAL_RAM_MIB=%d\n", $2/1024} /MemAvailable:/ {printf "FREE_RAM_MIB=%d\n", $2/1024}' /proc/meminfo
+          df -Pm / | awk 'NR==2 {print "FREE_DISK_MIB="$4}'
+          awk '{print "LOAD_1M="$1}' /proc/loadavg
+          if command -v ss >/dev/null 2>&1; then
+            if ss -lnt | awk '{print $4}' | grep -Eq '(^|:)443$'; then echo 'PORT_443_IN_USE=true'; else echo 'PORT_443_IN_USE=false'; fi
+            if ss -lnt | awk '{print $4}' | grep -Eq '(^|:)80$'; then echo 'PORT_80_IN_USE=true'; else echo 'PORT_80_IN_USE=false'; fi
+          else echo 'SS_NOT_AVAILABLE=true'; fi
+          if command -v systemctl >/dev/null 2>&1; then
+            for service in xray caddy nginx apache2; do
+              status="$(systemctl is-active "$service" 2>/dev/null || true)"
+              echo "SERVICE_${service}_ACTIVE=$status"
+            done
+          fi
+          echo "REMOTE_FILES_UNCHANGED=true"
+          REMOTE
