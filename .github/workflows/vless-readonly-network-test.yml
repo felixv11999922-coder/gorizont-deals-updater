@@ -1,0 +1,61 @@
+name: Read-only VLESS Worker network reachability
+on:
+  push:
+    branches: [experiment/vless-connectivity-audit]
+    paths: [.github/workflows/vless-readonly-network-test.yml]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_PORT: ${{ secrets.VPS_PORT }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+    steps:
+      - name: Check whether an existing authorized SSH endpoint is configured
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in VPS_HOST VPS_USER VPS_SSH_KEY; do
+            if [ -z "${!name:-}" ]; then echo "SSH_CREDENTIALS_MISSING=true"; exit 1; fi
+          done
+          echo "SSH_CREDENTIALS_PRESENT=true"
+      - name: Run read-only reachability check from an existing user-owned VPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$VPS_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          port="${VPS_PORT:-22}"
+          ssh-keyscan -T 8 -p "$port" -H "$VPS_HOST" > "$HOME/.ssh/known_hosts" 2>/dev/null
+          ssh -o BatchMode=yes -o ConnectTimeout=12 -o StrictHostKeyChecking=yes -p "$port" -i "$HOME/.ssh/id_ed25519" "$VPS_USER@$VPS_HOST" 'bash -se' <<'REMOTE'
+          set -euo pipefail
+          target='personal-vless-ws-probe-20261101.felixv11999922.workers.dev'
+          echo 'EXISTING_VPS_SSH_CONNECTION=true'
+          if command -v curl >/dev/null; then
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 6 --max-time 12 "https://$target/health" 2>/dev/null || true)"
+            echo "VPN_WORKER_HEALTH_HTTP=${code:-unreachable}"
+          fi
+          if command -v python3 >/dev/null; then
+            python3 - <<'PY'
+          import base64,os,socket,ssl
+          host="personal-vless-ws-probe-20261101.felixv11999922.workers.dev"
+          key=base64.b64encode(os.urandom(16)).decode("ascii")
+          try:
+            with socket.create_connection((host,443),timeout=8) as sock:
+              with ssl.create_default_context().wrap_socket(sock,server_hostname=host) as tls:
+                tls.settimeout(8)
+                request=(f"GET /vless HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n")
+                tls.sendall(request.encode("ascii"))
+                status=tls.recv(500).split(b"\r\n",1)[0].decode("latin-1",errors="replace")
+                print("VPN_WORKER_WS_RESPONSE="+status)
+          except (OSError,ssl.SSLError) as error:
+            print("VPN_WORKER_WS_RESPONSE=unreachable:"+type(error).__name__)
+          PY
+          fi
+          echo 'VPN_PRODUCTION_FILES_UNCHANGED=true'
+          REMOTE
