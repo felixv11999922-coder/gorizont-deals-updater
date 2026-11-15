@@ -1,0 +1,51 @@
+name: FirstVDS TCP connectivity phases from Russian VPS
+on:
+  push:
+    branches: [experiment/vless-connectivity-audit]
+    paths: [.github/workflows/firstvds-tcp-phase-audit.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_PORT: ${{ secrets.VPS_PORT }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+    steps:
+      - name: Compare network TCP phases without changing source or target VPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$VPS_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          port="${VPS_PORT:-22}"
+          ssh-keyscan -T 8 -p "$port" -H "$VPS_HOST" > "$HOME/.ssh/known_hosts" 2>/dev/null
+          ssh -o BatchMode=yes -o ConnectTimeout=12 -o StrictHostKeyChecking=yes -p "$port" -i "$HOME/.ssh/id_ed25519" "$VPS_USER@$VPS_HOST" 'python3 -' <<'PY'
+          import socket,ssl
+          tests=[
+              ("FIRSTVDS_443","132.243.127.53",443),
+              ("FIRSTVDS_80","132.243.127.53",80),
+              ("FIRSTVDS_22","132.243.127.53",22),
+              ("CONTROL_GOOGLE_443","www.google.com",443),
+              ("CONTROL_CLOUDFLARE_443","cloudflare.com",443),
+          ]
+          for label,host,port in tests:
+              try:
+                  with socket.create_connection((host,port),timeout=6) as sock:
+                      print(label+"=TCP_CONNECTED")
+                      if label=="FIRSTVDS_443":
+                          try:
+                              sock.settimeout(5)
+                              ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                              ctx.check_hostname=False
+                              ctx.verify_mode=ssl.CERT_NONE
+                              with ctx.wrap_socket(sock,server_hostname="myvnp-7.duckdns.org") as tls:
+                                  print("FIRSTVDS_TLS_PHASE="+tls.version())
+                          except Exception as error:print("FIRSTVDS_TLS_PHASE="+type(error).__name__)
+              except Exception as error: print(label+"="+type(error).__name__)
+          print("NO_VPS_CHANGES=true")
+          PY
