@@ -1,0 +1,61 @@
+name: Diagnose FirstVDS VLESS from existing Russian VPS (read-only)
+on:
+  push:
+    branches: [experiment/vless-connectivity-audit]
+    paths: [.github/workflows/firstvds-from-russia-readonly.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_PORT: ${{ secrets.VPS_PORT }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+    steps:
+      - name: Probe both existing FirstVDS endpoints FROM user-owned Russian VPS without changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$VPS_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          port="${VPS_PORT:-22}"
+          ssh-keyscan -T 8 -p "$port" -H "$VPS_HOST" > "$HOME/.ssh/known_hosts" 2>/dev/null
+          ssh -o BatchMode=yes -o ConnectTimeout=12 -o StrictHostKeyChecking=yes -p "$port" -i "$HOME/.ssh/id_ed25519" "$VPS_USER@$VPS_HOST" 'python3 -' <<'REMOTE_PY'
+          import socket,ssl,os,base64
+          ip="132.243.127.53"
+          for hostname in ("myvnp-7.duckdns.org","myvnp-7.dynv6.net"):
+              print("CHECK_DOMAIN="+hostname)
+              try:
+                  ips=sorted({r[4][0] for r in socket.getaddrinfo(hostname,443,type=socket.SOCK_STREAM,family=socket.AF_INET)})
+                  print("RUSSIAN_VPS_DNS="+",".join(ips))
+              except Exception as e:
+                  print("RUSSIAN_VPS_DNS_ERROR="+type(e).__name__)
+              try:
+                  raw=socket.create_connection((ip,443),timeout=7)
+                  with raw:
+                      ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                      ctx.check_hostname=False
+                      ctx.verify_mode=ssl.CERT_NONE
+                      with ctx.wrap_socket(raw,server_hostname=hostname) as s:
+                          s.settimeout(7)
+                          print("RUSSIAN_VPS_TLS="+s.version())
+                          key=base64.b64encode(os.urandom(16)).decode()
+                          request=f"GET /vless HTTP/1.1\r\nHost: {hostname}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+                          s.sendall(request.encode())
+                          print("RUSSIAN_VPS_WEBSOCKET="+s.recv(512).split(b"\r\n",1)[0].decode(errors="replace"))
+              except Exception as e:
+                  print("RUSSIAN_VPS_NETWORK_ERROR="+type(e).__name__+": "+str(e)[:150])
+          # Only check that the FirstVDS SSH port is publicly reachable. Never authenticate.
+          try:
+              with socket.create_connection((ip,22),timeout=5) as s:
+                  s.settimeout(4)
+                  data=s.recv(100)
+                  print("FIRSTVDS_SSH_PORT="+("OPEN:"+data.decode(errors="replace").strip().split(" ",1)[0] if data.startswith(b"SSH-") else "OPEN_UNEXPECTED_BANNER"))
+          except Exception as e:
+              print("FIRSTVDS_SSH_PORT="+type(e).__name__)
+          print("REMOTE_SYSTEM_UNCHANGED=true")
+          REMOTE_PY
