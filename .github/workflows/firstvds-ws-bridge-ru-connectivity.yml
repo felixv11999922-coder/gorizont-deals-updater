@@ -1,0 +1,48 @@
+name: Test new FirstVDS WebSocket bridge from Russian VPS (read-only)
+on:
+  push:
+    branches: [experiment/vless-connectivity-audit]
+    paths: [.github/workflows/firstvds-ws-bridge-ru-connectivity.yml]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_PORT: ${{ secrets.VPS_PORT }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+    steps:
+      - name: From existing Russian VPS test bridge versus inaccessible original
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$VPS_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          port="${VPS_PORT:-22}"
+          ssh-keyscan -T 8 -p "$port" -H "$VPS_HOST" > "$HOME/.ssh/known_hosts" 2>/dev/null
+          ssh -o BatchMode=yes -o ConnectTimeout=12 -o StrictHostKeyChecking=yes -p "$port" -i "$HOME/.ssh/id_ed25519" "$VPS_USER@$VPS_HOST" 'python3 -' <<'PY'
+          import ssl,socket,os,base64
+          def check(label,host,sni,path):
+            try:
+              conn=socket.create_connection((host,443),timeout=7)
+              with conn:
+                ctx=ssl.create_default_context()
+                with ctx.wrap_socket(conn,server_hostname=sni) as s:
+                  s.settimeout(8)
+                  print(label+'_TLS='+s.version())
+                  key=base64.b64encode(os.urandom(16)).decode('ascii')
+                  req=f'GET {path} HTTP/1.1\r\nHost: {sni}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n'
+                  s.sendall(req.encode('ascii'))
+                  header=s.recv(1024).split(b'\r\n',1)[0].decode('latin1',errors='replace')
+                  print(label+'_UPGRADE='+header)
+            except Exception as err:
+              print(label+'_ERROR='+type(err).__name__+':'+str(err)[:120])
+          bridge='firstvds-ws-bridge-20261115.felixv11999922.workers.dev'
+          check('BRIDGE_RUSSIAN_NETWORK',bridge,bridge,'/vless')
+          check('ORIGIN_RUSSIAN_NETWORK','132.243.127.53','myvnp-7.duckdns.org','/vless')
+          print('NO_REMOTE_CONFIGURATION_CHANGED=true')
+          PY
